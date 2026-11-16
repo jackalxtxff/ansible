@@ -111,6 +111,19 @@
       ]
     },
     {
+      "name": "swap",
+      "view": "System",
+      "description": "Swap-файл заданного размера: создать, изменить размер или удалить (playbooks/swap.yml)",
+      "playbook": "playbooks/swap.yml",
+      "survey_vars": [
+        {"name": "target", "title": "Target", "description": "de (группа); de1 (хост); de1,de2 (несколько); all:!de5 (кроме); all (всё — осознанно). ⚠️ Проверь охват перед Run", "type": "", "required": true},
+        {"name": "swap_state", "title": "State", "description": "present — создать или изменить размер; absent — отключить и удалить swap-файл", "default_value": "present", "type": "enum", "required": false, "values": [{"name": "present", "value": "present"}, {"name": "absent", "value": "absent"}]},
+        {"name": "swap_size", "title": "Size", "description": "Размер: число + M или G (512M, 2G), от 64M до 64G. Если файл уже есть другого размера — будет пересоздан", "default_value": "2G", "type": "", "required": false},
+        {"name": "swap_swappiness", "title": "vm.swappiness", "description": "0..100, например 10 — реже уходить в swap. Пусто — не менять", "type": "int", "required": false},
+        {"name": "swap_file", "title": "Swap file path", "description": "Путь к файлу, пусто — /swapfile", "default_value": "/swapfile", "type": "", "required": false}
+      ]
+    },
+    {
       "name": "ipv6",
       "view": "System",
       "description": "IPv6 вкл/выкл через sysctl (с гардом от самозабанивания) (playbooks/ipv6.yml)",

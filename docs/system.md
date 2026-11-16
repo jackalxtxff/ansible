@@ -54,6 +54,23 @@ Hostname — это идентификатор (приглашение, journal/
 }
 ```
 
+## `playbooks/swap.yml` (swap-файл, перезагрузка не нужна)
+
+- `swap_state: present` (Enum) — создать или изменить размер; `absent` — отключить, убрать из `/etc/fstab` и удалить файл
+- `swap_size: 2G` — число + `M`/`G` (`512M`, `2G`), от `64M` до `64G`. Файл другого размера пересоздаётся (`swapoff` → удаление → создание)
+- `swap_swappiness` (Int, пусто — не трогать) — `vm.swappiness` в `/etc/sysctl.d/99-swap.conf`, применяется сразу
+- `swap_file: /swapfile`; `swap_min_free_mb: 1024` — сколько места должно остаться на диске после создания (только через Extra vars)
+- проверки до изменений: формат размера, свободное место, тип ФС (на `btrfs`/`zfs`/`tmpfs`/`overlayfs`/`nfs` — отказ), запас RAM перед `swapoff` (если в swap лежит больше, чем есть свободной памяти, — отказ, чтобы не словить OOM)
+- повторный прогон с тем же размером ничего не меняет; `fallocate`, при неудаче — `dd`; `/etc/fstab` с бэкапом
+
+```json
+{
+  "target": "de1",
+  "swap_size": "2G",
+  "swap_swappiness": 10
+}
+```
+
 ## `playbooks/bbr.yml` (перезагрузка не нужна, применяется сразу)
 
 - `bbr_enabled: true` -> `false` чтобы откатить на `cubic + fq_codel` (Enum)

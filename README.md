@@ -74,7 +74,7 @@ docs/
   run.md             # ping, run_cmd, run_script (вкладка Run)
   observability.md   # logs, health, diagnostics, rsyslog
   diagnostics.md     # гибридная диагностика: свои пробы + pinned upstream
-  system.md          # base, docker, bbr, ipv6, update, cleanup, reboot
+  system.md          # base, docker, bbr, swap, ipv6, update, cleanup, reboot
   security.md        # init_node, firewall, fail2ban, модель доверия Semaphore
   crowdsec.md        # register/node/update/unregister/adopt/move/purge
   remnawave.md       # node_add/deploy/config/update/move/remove/purge + группа remnawave_vars
@@ -135,7 +135,7 @@ Bool'ы (`use_shell`, `allow_fail`, `skip_sshd`...) — Enum со значени
 - [docs/semaphore-ui.md](docs/semaphore-ui.md) — чеклист подключения.
 - [docs/run.md](docs/run.md) — ping, run_cmd, run_script.
 - [docs/observability.md](docs/observability.md) — logs, health, diagnostics, rsyslog.
-- [docs/system.md](docs/system.md) — base, docker, bbr, ipv6, update, cleanup, reboot.
+- [docs/system.md](docs/system.md) — base, docker, bbr, swap, ipv6, update, cleanup, reboot.
 - [docs/security.md](docs/security.md) — init_node, firewall, fail2ban.
 - [docs/crowdsec.md](docs/crowdsec.md) — register/node/update/unregister.
 - [docs/remnawave.md](docs/remnawave.md) — node_add/update + группа `remnawave_vars`.
