@@ -1,0 +1,268 @@
+---
+- name: Manage swap file
+  hosts: "{{ target }}"
+  gather_facts: false
+  become: true
+  vars:
+    # present — создать/изменить размер; absent — отключить и удалить.
+    swap_state: present
+    # Размер: число + M или G (512M, 2G). Только для present.
+    swap_size: 2G
+    swap_file: /swapfile
+    # vm.swappiness (0..100). Пусто — не трогать.
+    swap_swappiness: ""
+    # Сколько места должно остаться на диске после создания файла, МиБ.
+    swap_min_free_mb: 1024
+    swap_sysctl_file: /etc/sysctl.d/99-swap.conf
+  tasks:
+    - name: Validate swap_state
+      ansible.builtin.fail:
+        msg: "swap_state must be present or absent, got '{{ swap_state }}'"
+      when: swap_state not in ['present', 'absent']
+
+    - name: Validate swap_file path
+      ansible.builtin.fail:
+        msg: "swap_file must be an absolute path to a file (letters, digits, . _ / -), not a directory, got '{{ swap_file }}'"
+      when: >-
+        not (swap_file is match('^/[A-Za-z0-9._/-]+$'))
+        or ('..' in swap_file)
+        or swap_file.endswith('/')
+        or swap_file in ['/', '/etc', '/usr', '/var', '/boot', '/home', '/root']
+
+    - name: Validate swap_size
+      ansible.builtin.fail:
+        msg: "swap_size must be a number with M or G (e.g. 512M, 2G), from 64M to 64G, got '{{ swap_size }}'"
+      when:
+        - swap_state == 'present'
+        - >-
+          not ((swap_size | string | upper) is match('^[1-9][0-9]*[MG]$'))
+          or (swap_size_mb | int) < 64
+          or (swap_size_mb | int) > 65536
+      vars:
+        swap_size_mb: "{{ ((swap_size | string | upper)[:-1] | int) * (1024 if (swap_size | string | upper).endswith('G') else 1) }}"
+
+    - name: Validate swap_swappiness
+      ansible.builtin.fail:
+        msg: "swap_swappiness must be empty or 0..100, got '{{ swap_swappiness }}'"
+      when:
+        - swap_swappiness | string | length > 0
+        - not ((swap_swappiness | string) is match('^[0-9]{1,3}$')) or (swap_swappiness | int) > 100
+
+    - name: Resolve wanted size
+      ansible.builtin.set_fact:
+        swap_size_mb: "{{ ((swap_size | string | upper)[:-1] | int) * (1024 if (swap_size | string | upper).endswith('G') else 1) if swap_state == 'present' else 0 }}"
+
+    # --- Текущее состояние ---
+
+    - name: Check swap file
+      ansible.builtin.stat:
+        path: "{{ swap_file }}"
+      register: swap_stat
+
+    - name: Refuse when swap_file is not a regular file
+      ansible.builtin.fail:
+        msg: "{{ swap_file }} exists and is not a regular file — refusing to touch it"
+      when:
+        - swap_stat.stat.exists
+        - not swap_stat.stat.isreg
+
+    - name: Read active swap areas
+      ansible.builtin.command:
+        argv: ["swapon", "--show=NAME,TYPE,SIZE,USED", "--bytes", "--noheadings"]
+      register: swap_show
+      changed_when: false
+      check_mode: false
+
+    - name: Read memory info
+      ansible.builtin.command:
+        argv: ["cat", "/proc/meminfo"]
+      register: swap_meminfo
+      changed_when: false
+      check_mode: false
+
+    - name: Resolve current state
+      ansible.builtin.set_fact:
+        swap_active: "{{ swap_this_line | length > 0 }}"
+        swap_used_mb: "{{ ((swap_this_line.split()[3] | default(0) | int) / 1048576) | round(0, 'ceil') | int if swap_this_line | length > 0 else 0 }}"
+        swap_current_mb: "{{ ((swap_stat.stat.size | default(0) | int) / 1048576) | int }}"
+        swap_mem_available_mb: "{{ ((swap_meminfo.stdout | regex_search('MemAvailable:\\s+([0-9]+)', '\\1') | first | default(0) | int) / 1024) | int }}"
+      vars:
+        swap_this_line: "{{ swap_show.stdout_lines | select('match', '^' ~ (swap_file | regex_escape) ~ '\\s') | first | default('') }}"
+
+    - name: Resolve required action
+      ansible.builtin.set_fact:
+        # Файл есть, нужного размера и включён — делать нечего.
+        swap_ok: "{{ swap_state == 'present' and swap_stat.stat.exists and (swap_current_mb | int) == (swap_size_mb | int) and (swap_active | bool) }}"
+        swap_recreate: "{{ swap_state == 'present' and swap_stat.stat.exists and (swap_current_mb | int) != (swap_size_mb | int) }}"
+
+    # swapoff переносит занятые страницы в RAM: без запаса памяти ядро начнёт
+    # убивать процессы (OOM).
+    - name: Refuse swapoff without enough free RAM
+      ansible.builtin.fail:
+        msg: >-
+          {{ swap_file }} holds {{ swap_used_mb }} MiB of swapped-out memory, but only
+          {{ swap_mem_available_mb }} MiB RAM is available. swapoff could trigger OOM —
+          free memory first or resize at a quieter time
+      when:
+        - swap_active | bool
+        - (swap_recreate | bool) or swap_state == 'absent'
+        - (swap_used_mb | int) + 256 > (swap_mem_available_mb | int)
+
+    # --- Удаление / пересоздание ---
+
+    - name: Disable swap file
+      ansible.builtin.command:
+        argv: ["swapoff", "{{ swap_file }}"]
+      changed_when: true
+      when:
+        - swap_active | bool
+        - (swap_recreate | bool) or swap_state == 'absent'
+
+    - name: Remove swap file
+      ansible.builtin.file:
+        path: "{{ swap_file }}"
+        state: absent
+      when: (swap_recreate | bool) or swap_state == 'absent'
+
+    - name: Remove swap entry from fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: '^\s*{{ swap_file | regex_escape }}\s+'
+        state: absent
+        backup: true
+      when: swap_state == 'absent'
+
+    - name: Remove swappiness setting
+      ansible.builtin.file:
+        path: "{{ swap_sysctl_file }}"
+        state: absent
+      when: swap_state == 'absent'
+
+    # --- Создание ---
+
+    - name: Check filesystem type for swap file
+      ansible.builtin.command:
+        argv: ["stat", "-f", "-c", "%T", "{{ swap_file | dirname }}"]
+      register: swap_fstype
+      changed_when: false
+      check_mode: false
+      when:
+        - swap_state == 'present'
+        - not (swap_ok | bool)
+
+    # На btrfs/zfs обычный swap-файл не работает (нужны chattr +C / zvol).
+    - name: Refuse unsupported filesystem
+      ansible.builtin.fail:
+        msg: "{{ swap_file | dirname }} is on {{ swap_fstype.stdout | trim }} — swap file is not supported here by this playbook (needs btrfs mkswapfile / zvol)"
+      when:
+        - swap_state == 'present'
+        - not (swap_ok | bool)
+        - (swap_fstype.stdout | trim) in ['btrfs', 'zfs', 'tmpfs', 'overlayfs', 'nfs']
+
+    - name: Check free disk space
+      ansible.builtin.command:
+        argv: ["df", "--output=avail", "-B1M", "{{ swap_file | dirname }}"]
+      register: swap_df
+      changed_when: false
+      check_mode: false
+      when:
+        - swap_state == 'present'
+        - not (swap_ok | bool)
+
+    - name: Refuse when disk space is short
+      ansible.builtin.fail:
+        msg: >-
+          Not enough disk space in {{ swap_file | dirname }}: {{ swap_df.stdout_lines[-1] | trim }} MiB available,
+          need {{ swap_size_mb }} MiB for swap + {{ swap_min_free_mb }} MiB reserve (swap_min_free_mb)
+      when:
+        - swap_state == 'present'
+        - not (swap_ok | bool)
+        - (swap_df.stdout_lines[-1] | trim | int) < (swap_size_mb | int) + (swap_min_free_mb | int) - ((swap_current_mb | int) if (swap_recreate | bool) else 0)
+
+    - name: Allocate swap file
+      ansible.builtin.command:
+        argv: ["fallocate", "-l", "{{ swap_size_mb }}M", "{{ swap_file }}"]
+      register: swap_fallocate
+      changed_when: true
+      failed_when: false
+      when:
+        - swap_state == 'present'
+        - not swap_stat.stat.exists or (swap_recreate | bool)
+
+    # Если fallocate не поддерживается файловой системой — записываем нули.
+    - name: Allocate swap file with dd (fallocate unsupported)
+      ansible.builtin.command:
+        argv: ["dd", "if=/dev/zero", "of={{ swap_file }}", "bs=1M", "count={{ swap_size_mb }}", "status=none"]
+      changed_when: true
+      when:
+        - swap_state == 'present'
+        - swap_fallocate is not skipped
+        - swap_fallocate.rc | default(0) != 0
+
+    - name: Set swap file permissions
+      ansible.builtin.file:
+        path: "{{ swap_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      when: swap_state == 'present'
+
+    - name: Format swap file
+      ansible.builtin.command:
+        argv: ["mkswap", "{{ swap_file }}"]
+      changed_when: true
+      when:
+        - swap_state == 'present'
+        - not swap_stat.stat.exists or (swap_recreate | bool)
+
+    - name: Enable swap file
+      ansible.builtin.command:
+        argv: ["swapon", "{{ swap_file }}"]
+      changed_when: true
+      when:
+        - swap_state == 'present'
+        - not (swap_ok | bool)
+
+    - name: Persist swap in fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: '^\s*{{ swap_file | regex_escape }}\s+'
+        line: "{{ swap_file }} none swap sw 0 0"
+        backup: true
+      when: swap_state == 'present'
+
+    - name: Set vm.swappiness
+      ansible.posix.sysctl:
+        name: vm.swappiness
+        value: "{{ swap_swappiness | string }}"
+        sysctl_file: "{{ swap_sysctl_file }}"
+        reload: true
+      when:
+        - swap_state == 'present'
+        - swap_swappiness | string | length > 0
+
+    # --- Проверка ---
+
+    - name: Read swap state after changes
+      ansible.builtin.command:
+        argv: ["swapon", "--show=NAME,SIZE,USED", "--bytes", "--noheadings"]
+      register: swap_after
+      changed_when: false
+      check_mode: false
+
+    - name: Assert swap state
+      ansible.builtin.assert:
+        that:
+          - (swap_after.stdout_lines | select('match', '^' ~ (swap_file | regex_escape) ~ '\s') | list | length) == (1 if swap_state == 'present' else 0)
+        fail_msg: "swap state for {{ swap_file }} is not {{ swap_state }}: {{ swap_after.stdout | default('') }}"
+      when: not ansible_check_mode
+
+    - name: Show swap summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ swap_file }}
+          {{ ('already ' ~ swap_size_mb ~ ' MiB, active — no changes') if (swap_ok | bool)
+             else (('resized ' ~ swap_current_mb ~ ' -> ' ~ swap_size_mb ~ ' MiB') if (swap_recreate | bool)
+             else (('created ' ~ swap_size_mb ~ ' MiB') if swap_state == 'present' else 'removed')) }}{{
+             (', vm.swappiness=' ~ swap_swappiness) if (swap_state == 'present' and (swap_swappiness | string | length > 0)) else '' }}.
+          Active swap: {{ swap_after.stdout_lines | join('; ') or 'none' }}
